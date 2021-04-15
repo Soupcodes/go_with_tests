@@ -17,7 +17,7 @@ func TestRacer(t *testing.T) {
 	t.Run("Return the fastest responding url", func(t *testing.T) {
 		// Create a dummy server with a mux handler to simulate a backend api response against an open local port
 		slowServer := makeDummyServer(20 * time.Millisecond)
-		fastServer := makeDummyServer(0)
+		fastServer := makeDummyServer(0 * time.Millisecond)
 		defer slowServer.Close()
 		defer fastServer.Close()
 
@@ -25,7 +25,11 @@ func TestRacer(t *testing.T) {
 		fastURL := fastServer.URL
 
 		want := fastURL
-		got, _ := Racer(slowURL, fastURL)
+		got, err := Racer(slowURL, fastURL)
+
+		if err != nil {
+			t.Fatalf("did not expect an error but got one %v", err)
+		}
 
 		if got != want {
 			t.Fatalf("Got: %s, Want: %s", got, want)
@@ -33,12 +37,11 @@ func TestRacer(t *testing.T) {
 	})
 
 	t.Run("Timeout if requests take longer than 10 secs", func(t *testing.T) {
-		slowServer1 := makeDummyServer(11 * time.Second)
-		slowServer2 := makeDummyServer(12 * time.Second)
-		defer slowServer1.Close()
-		defer slowServer2.Close()
+		srv := makeDummyServer(20 * time.Millisecond)
+		defer srv.Close()
 
-		_, err := Racer(slowServer1.URL, slowServer2.URL)
+		timeout := 10 * time.Millisecond
+		_, err := ConfigurableRacer(srv.URL, srv.URL, timeout)
 
 		if err == nil {
 			t.Error("Expected an error, got none")
