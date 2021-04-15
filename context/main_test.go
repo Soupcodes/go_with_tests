@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -9,32 +10,68 @@ import (
 )
 
 type SpyStore struct {
-	response  string
-	cancelled bool
-	t         *testing.T
+	response string
+	t        *testing.T
 }
 
-func (s *SpyStore) assertWasCancelled() {
-	s.t.Helper()
-	if !s.cancelled {
-		s.t.Errorf("store was not told to cancel")
+// func (s *SpyStore) assertWasCancelled() {
+// 	s.t.Helper()
+// 	if !s.cancelled {
+// 		s.t.Errorf("store was not told to cancel")
+// 	}
+// }
+
+// func (s *SpyStore) assertWasNotCancelled() {
+// 	s.t.Helper()
+// 	if s.cancelled {
+// 		s.t.Errorf("store was told to cancel")
+// 	}
+// }
+
+func (s *SpyStore) Fetch(ctx context.Context) (string, error) {
+	data := make(chan string, 1)
+
+	go func() {
+		var result string
+		for _, c := range s.response {
+			select {
+			case <-ctx.Done(): // ctx holds a Done channel
+				s.t.Log("Spy store got cancelled")
+				return
+			default:
+				time.Sleep(100 * time.Millisecond) // Artificially create a delay in getting the response so cancelling can be tested
+				result += string(c)
+			}
+		}
+		data <- result
+	}()
+
+	// Blocking select statement will either return the data to the user or cancel the store, depending on what request comes back first
+	// Select RACES asynchronous processes against each other and exits when one completes
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err() // context also holds an error type that can be returned as an error
+	case res := <-data:
+		return res, nil
 	}
 }
 
-func (s *SpyStore) assertWasNotCancelled() {
-	s.t.Helper()
-	if s.cancelled {
-		s.t.Errorf("store was told to cancel")
-	}
+type SpyResponseWriter struct {
+	written bool
 }
 
-func (s *SpyStore) Fetch() string {
-	time.Sleep(100 * time.Millisecond)
-	return s.response
+func (s *SpyResponseWriter) Header() http.Header {
+	s.written = true
+	return nil
 }
 
-func (s *SpyStore) Cancel() {
-	s.cancelled = true
+func (s *SpyResponseWriter) Write([]byte) (int, error) {
+	s.written = true
+	return 0, errors.New("not implemented")
+}
+
+func (s *SpyResponseWriter) WriteHeader(statusCode int) {
+	s.written = true
 }
 
 func TestServer(t *testing.T) {
@@ -42,16 +79,15 @@ func TestServer(t *testing.T) {
 	t.Run("returns data from store", func(t *testing.T) {
 		data := "hello, world"
 		store := &SpyStore{response: data, t: t}
-		svr := Server(store)
+		srv := Server(store)
 
 		request := httptest.NewRequest(http.MethodGet, "/", nil)
 		response := httptest.NewRecorder()
-		svr.ServeHTTP(response, request)
+		srv.ServeHTTP(response, request)
 
 		if response.Body.String() != data {
 			t.Errorf(`got "%s", want "%s"`, response.Body.String(), data)
 		}
-		store.assertWasNotCancelled()
 	})
 
 	t.Run("Tell store to cancel work if request is cancelled", func(t *testing.T) {
@@ -65,9 +101,11 @@ func TestServer(t *testing.T) {
 		// cancelCtx will capture the current state of the req.Context()
 		time.AfterFunc(5*time.Millisecond, cancel) // invoke cancel after a delay
 		req = req.WithContext(cancelCtx)           // reassign req with the updated context captured by cancelCtx
-		res := httptest.NewRecorder()              // This will capture the response of the request
+		res := &SpyResponseWriter{}                // This will capture the response of the request
 		srv.ServeHTTP(res, req)
 
-		store.assertWasCancelled()
+		if res.written {
+			t.Error("a response should not have been written")
+		}
 	})
 }
